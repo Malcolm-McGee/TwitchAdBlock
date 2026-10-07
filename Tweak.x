@@ -223,7 +223,8 @@ BOOL twab_isExternalPlayback(void) {
   NSURLComponents *components = [NSURLComponents componentsWithURL:URL resolvingAgainstBaseURL:YES];
   components.scheme = @"twab";
   URL = components.URL;
-  if ((self = %orig)) {
+  self = %orig;
+  if (self) {
     [self.resourceLoader setDelegate:assetResourceLoaderDelegate
                                queue:dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0)];
   }
@@ -257,17 +258,20 @@ BOOL twab_isExternalPlayback(void) {
 }
 - (BOOL)resourceLoader:(AVAssetResourceLoader *)resourceLoader
     shouldWaitForLoadingOfRequestedResource:(AVAssetResourceLoadingRequest *)loadingRequest {
-  return ![self handleLoadingRequest:loadingRequest] ? %orig : YES;
+  if ([self handleLoadingRequest:loadingRequest]) return YES;
+  return %orig;
 }
 - (BOOL)resourceLoader:(AVAssetResourceLoader *)resourceLoader
     shouldWaitForRenewalOfRequestedResource:(AVAssetResourceRenewalRequest *)renewalRequest {
-  return ![self handleLoadingRequest:renewalRequest] ? %orig : YES;
+  if ([self handleLoadingRequest:renewalRequest]) return YES;
+  return %orig;
 }
 %end
 
 %hook AVPlayer
 - (instancetype)init {
-  if ((self = %orig)) {
+  self = %orig;
+  if (self) {
     [self addObserver:self forKeyPath:@"status" options:NSKeyValueObservingOptionNew context:NULL];
   }
   return self;
@@ -361,7 +365,8 @@ static void twab_clearFollowingAds(id self) {
 - (instancetype)initWithGraphQL:(_TtC9TwitchKit9TKGraphQL *)graphQL
                    themeManager:(id)themeManager {
   if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled]) return %orig;
-  if ((self = %orig)) twab_clearFollowingAds(self);
+  self = %orig;
+  if (self) twab_clearFollowingAds(self);
   return self;
 }
 // 23.x – 28.x (3-arg)
@@ -369,7 +374,8 @@ static void twab_clearFollowingAds(id self) {
                    themeManager:(id)themeManager
                   urlController:(_TtC6Twitch13URLController *)urlController {
   if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled]) return %orig;
-  if ((self = %orig)) twab_clearFollowingAds(self);
+  self = %orig;
+  if (self) twab_clearFollowingAds(self);
   return self;
 }
 // 29.x+ (4-arg)
@@ -378,7 +384,8 @@ static void twab_clearFollowingAds(id self) {
                   urlController:(_TtC6Twitch13URLController *)urlController
                    isInitialTab:(BOOL)isInitialTab {
   if (![tweakDefaults boolForKey:TWABKeyAdBlockEnabled]) return %orig;
-  if ((self = %orig)) twab_clearFollowingAds(self);
+  self = %orig;
+  if (self) twab_clearFollowingAds(self);
   return self;
 }
 %end

@@ -86,7 +86,7 @@ page and jump to **Install**.
 2. Clone and build:
 
    ```bash
-   git clone https://github.com/gunnerkidBT/TwitchAdBlock.git
+   git clone https://github.com/Malcolm-McGee/TwitchAdBlock.git
    cd TwitchAdBlock
    git submodule update --init --recursive
    export THEOS=~/theos
@@ -101,7 +101,9 @@ page and jump to **Install**.
        Twitch-patched.ipa
    ```
 
-   (This drops the tweak into the app and lets it load plain-HTTP proxy traffic.)
+   (This drops the tweak and its translations into the app and lets it load
+   plain-HTTP proxy traffic. If you already ran `make` before pulling changes,
+   run `make clean` first so you don't inject a stale build.)
 
 **Install**
 

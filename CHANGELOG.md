@@ -5,6 +5,20 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## Unreleased
+
+**Builds again with current Theos.** Newer versions of Theos's code generator
+couldn't handle a few lines in the tweak, so `make SIDELOADED=1` failed with
+"expected ')'" errors in `Tweak.x`. Those lines are rewritten so the build works
+on both old and new Theos.
+
+**More reliable IPA patching.** `inject_ipa.py` now keeps the app's file
+permissions and framework links intact (before, it could make the patched app
+fail to install or launch), works with universal ("fat") app binaries, finds the
+app's real executable name, and copies the settings translations into the app.
+
+---
+
 ## v0.1.13 — August 13, 2026
 
 **Casting and AirPlay to a TV now work with ad-blocking on.** Before, having the

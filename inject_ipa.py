@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
 inject_ipa.py
-Extracts the Twitch IPA, copies the compiled dylib into Frameworks/,
+Reads the Twitch IPA, adds the compiled dylib to Frameworks/,
 injects an LC_LOAD_DYLIB load command into the Twitch Mach-O binary,
 and repacks into a new IPA ready for sideloading.
 
 Usage:
-    python3 inject_ipa.py <input.ipa> <TwitchTTVLOL.dylib> [output.ipa]
+    python3 inject_ipa.py <input.ipa> <TwitchAdBlock.dylib> [output.ipa]
 """
 
 import struct
 import sys
 import zipfile
-import shutil
 import os
 import tempfile
 import plistlib
@@ -189,6 +188,51 @@ def patch_ats(plist_path: str) -> None:
     print(f"  Set NSAppTransportSecurity.NSAllowsArbitraryLoads = True")
 
 
+FAT_MAGIC    = 0xCAFEBABE
+FAT_MAGIC_64 = 0xCAFEBABF
+CPU_TYPE_ARM64 = 0x0100000C
+
+
+def patch_macho(binary: bytes, install_name: bytes) -> bytes:
+    """Clear cryptid and inject LC_LOAD_DYLIB. Handles thin arm64 binaries and
+    fat (universal) binaries, in which case every arm64 slice is patched."""
+    magic = struct.unpack_from(">I", binary)[0]
+    if magic not in (FAT_MAGIC, FAT_MAGIC_64):
+        return inject_load_dylib(clear_cryptid(binary), install_name)
+
+    is64 = magic == FAT_MAGIC_64
+    nfat = struct.unpack_from(">I", binary, 4)[0]
+    arch_fmt = ">iiQQI4x" if is64 else ">iiIII"
+    arch_size = struct.calcsize(arch_fmt)
+    out = bytearray(binary)
+    patched_any = False
+    for i in range(nfat):
+        cputype, _, offset, size, _ = struct.unpack_from(arch_fmt, binary, 8 + i * arch_size)
+        if cputype != CPU_TYPE_ARM64:
+            print(f"  Skipping non-arm64 slice (cputype {cputype:#x})")
+            continue
+        print(f"  Patching arm64 slice at offset {offset:#x}")
+        slice_data = inject_load_dylib(clear_cryptid(binary[offset:offset + size]), install_name)
+        assert len(slice_data) == size
+        out[offset:offset + size] = slice_data
+        patched_any = True
+    if not patched_any:
+        raise RuntimeError("Fat binary has no arm64 slice")
+    return bytes(out)
+
+
+def unix_mode(info: zipfile.ZipInfo) -> int:
+    return (info.external_attr >> 16) & 0xFFFF
+
+
+def make_info(name: str, template: zipfile.ZipInfo = None, mode: int = 0o100644) -> zipfile.ZipInfo:
+    info = zipfile.ZipInfo(name, date_time=template.date_time if template else (2020, 1, 1, 0, 0, 0))
+    info.create_system = 3  # Unix, so the permission bits below are honoured
+    info.external_attr = ((unix_mode(template) if template and unix_mode(template) else mode) << 16)
+    info.compress_type = zipfile.ZIP_DEFLATED
+    return info
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
@@ -198,84 +242,105 @@ def main():
     dylib_src = sys.argv[2]
     out_path  = sys.argv[3] if len(sys.argv) > 3 else ipa_path.replace(".ipa", "-patched.ipa")
 
-    print(f"[1/5] Reading IPA: {ipa_path}")
-    with zipfile.ZipFile(ipa_path, "r") as z:
-        names = z.namelist()
+    if not os.path.isfile(dylib_src):
+        raise SystemExit(f"Dylib not found: {dylib_src} (did `make SIDELOADED=1` succeed?)")
+
+    print(f"[1/6] Reading IPA: {ipa_path}")
+    zin = zipfile.ZipFile(ipa_path, "r")
+    infos = zin.infolist()
 
     # Find app bundle name — entries look like "Payload/Twitch.app/somefile"
     app_name = None
-    for n in names:
-        parts = n.split("/")
+    for info in infos:
+        parts = info.filename.split("/")
         if len(parts) >= 2 and parts[0] == "Payload" and parts[1].endswith(".app"):
             app_name = parts[1]  # e.g. "Twitch.app"
             break
     if not app_name:
         raise RuntimeError("Could not find .app bundle in IPA")
 
-    binary_name  = app_name.replace(".app", "")  # e.g. "Twitch"
+    app_prefix = f"Payload/{app_name}/"
+    info_plist_zip_path = app_prefix + "Info.plist"
+    try:
+        info_plist_data = zin.read(info_plist_zip_path)
+    except KeyError:
+        info_plist_data = None
+    binary_name = app_name[:-len(".app")]
+    if info_plist_data:
+        binary_name = plistlib.loads(info_plist_data).get("CFBundleExecutable", binary_name)
+
     dylib_fname  = os.path.basename(dylib_src)   # e.g. "TwitchAdBlock.dylib"
     install_name = f"@executable_path/Frameworks/{dylib_fname}".encode() + b"\x00"
 
-    binary_zip_path = f"Payload/{app_name}/{binary_name}"
-    dylib_zip_path  = f"Payload/{app_name}/Frameworks/{dylib_fname}"
+    binary_zip_path = app_prefix + binary_name
+    dylib_zip_path  = app_prefix + "Frameworks/" + dylib_fname
 
     print(f"  App bundle  : {app_name}")
     print(f"  Binary path : {binary_zip_path}")
     print(f"  Dylib name  : {dylib_fname}")
 
-    print(f"[2/5] Extracting IPA to temp dir...")
-    tmpdir = tempfile.mkdtemp(prefix="ttvlol_")
+    print(f"[2/6] Patching Mach-O binary...")
     try:
-        with zipfile.ZipFile(ipa_path, "r") as z:
-            z.extractall(tmpdir)
+        binary_info = zin.getinfo(binary_zip_path)
+    except KeyError:
+        raise RuntimeError(f"Main executable {binary_zip_path} not found in IPA")
+    patched_binary = patch_macho(zin.read(binary_info), install_name)
 
-        binary_path = os.path.join(tmpdir, binary_zip_path)
-        frameworks_dir = os.path.join(tmpdir, f"Payload/{app_name}/Frameworks")
-        dylib_dest = os.path.join(frameworks_dir, dylib_fname)
+    print(f"[3/6] Patching Info.plist (ATS bypass for plain-HTTP proxy)...")
+    patched_plist = None
+    if info_plist_data:
+        with tempfile.NamedTemporaryFile(suffix=".plist", delete=False) as tmp:
+            tmp.write(info_plist_data)
+        try:
+            patch_ats(tmp.name)
+            with open(tmp.name, "rb") as f:
+                patched_plist = f.read()
+        finally:
+            os.unlink(tmp.name)
+    else:
+        print(f"  WARNING: {info_plist_zip_path} not found — proxy routing will fail with ATS errors")
 
-        print(f"[3/5] Copying dylib -> {dylib_zip_path}")
-        os.makedirs(frameworks_dir, exist_ok=True)
-        shutil.copy2(dylib_src, dylib_dest)
+    # Localization bundle (optional — the settings UI falls back to English without it)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    bundle_src = os.path.join(script_dir, "layout", "Library", "Application Support", "TwitchAdBlock.bundle")
+    bundle_zip_prefix = app_prefix + "TwitchAdBlock.bundle/"
 
-        print(f"[4/6] Patching Mach-O binary...")
-        with open(binary_path, "rb") as f:
-            binary_data = f.read()
+    replaced = {binary_zip_path: patched_binary, dylib_zip_path: None, info_plist_zip_path: patched_plist}
 
-        binary_data = clear_cryptid(binary_data)
-        patched = inject_load_dylib(binary_data, install_name)
+    print(f"[4/6] Copying dylib -> {dylib_zip_path}")
+    print(f"[5/6] Copying localization bundle -> {bundle_zip_prefix}" if os.path.isdir(bundle_src)
+          else "[5/6] Localization bundle not found — skipping")
+    print(f"[6/6] Repacking IPA -> {out_path}")
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
+        # Copy every original entry, keeping its metadata (Unix permissions,
+        # symlinks inside frameworks). Extracting to disk with zipfile would drop
+        # the executable bits and break the app on install/launch.
+        for info in infos:
+            name = info.filename
+            if name.startswith(bundle_zip_prefix) or name == dylib_zip_path:
+                continue
+            if name in replaced:
+                if replaced[name] is not None:
+                    zout.writestr(make_info(name, info), replaced[name])
+                continue
+            zout.writestr(info, zin.read(info), compress_type=info.compress_type)
 
-        with open(binary_path, "wb") as f:
-            f.write(patched)
+        with open(dylib_src, "rb") as f:
+            zout.writestr(make_info(dylib_zip_path, mode=0o100755), f.read())
 
-        print(f"[5/6] Patching Info.plist (ATS bypass for plain-HTTP proxy)...")
-        info_plist = os.path.join(tmpdir, f"Payload/{app_name}/Info.plist")
-        if os.path.exists(info_plist):
-            patch_ats(info_plist)
-        else:
-            print(f"  WARNING: {info_plist} not found — proxy routing will fail with ATS errors")
-
-        print(f"[6/6] Repacking IPA -> {out_path}")
-        payload_dir = os.path.join(tmpdir, "Payload")
-        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
-            # Preserve iTunesArtwork / iTunesMetadata if present
-            for extra in ["iTunesArtwork", "iTunesMetadata.plist"]:
-                ep = os.path.join(tmpdir, extra)
-                if os.path.exists(ep):
-                    zout.write(ep, extra)
-
-            for root, dirs, files in os.walk(payload_dir):
+        if os.path.isdir(bundle_src):
+            for root, _, files in os.walk(bundle_src):
                 for file in files:
                     fpath = os.path.join(root, file)
-                    arcname = "Payload/" + os.path.relpath(fpath, payload_dir)
-                    zout.write(fpath, arcname)
+                    rel = os.path.relpath(fpath, bundle_src).replace(os.sep, "/")
+                    with open(fpath, "rb") as f:
+                        zout.writestr(make_info(bundle_zip_prefix + rel), f.read())
+    zin.close()
 
-        print(f"\nDone! Patched IPA: {out_path}")
-        print("\nNext steps:")
-        print("  AltStore / SideStore : drag the IPA into AltStore to install & sign")
-        print("  TrollStore           : run  ldid -S  on the binary inside, then install")
-
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    print(f"\nDone! Patched IPA: {out_path}")
+    print("\nNext steps:")
+    print("  AltStore / SideStore : drag the IPA into AltStore to install & sign")
+    print("  TrollStore           : open the IPA in TrollStore to install")
 
 
 if __name__ == "__main__":
