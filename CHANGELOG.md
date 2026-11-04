@@ -12,6 +12,10 @@ screen, Twitch normally runs in a phone-sized window with empty space on
 both sides. IPAs built with the new `--duo` option use the whole screen
 instead, and resize as you open, close or split the phone.
 
+**Video goes all the way to the edge on iPhone Duo.** When a stream fills the
+screen in landscape, the status bar (time, Wi‑Fi, battery) now hides like it does
+in YouTube, and the video uses the column it was taking up.
+
 **Works with more than one Twitch window.** The "Go Ad-Free" hider now checks
 every open window, so it still works in Split View.
 
