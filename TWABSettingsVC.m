@@ -2,6 +2,7 @@
 #import "Config.h"
 #import "SettingsKeys.h"
 #import "NSURLSession+TwitchAdBlock.h"
+#import "DuoSupport.h"
 
 extern NSBundle *tweakBundle;
 extern NSUserDefaults *tweakDefaults;
@@ -21,11 +22,13 @@ extern NSArray<NSDictionary *> *twab_classDiagnostics(void);
 
 @implementation TWABDiagnosticsVC {
     NSArray<NSDictionary *> *_items;
+    NSArray<NSString *> *_displayLines;
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = LOC(@"settings.diag.title", @"Diagnostics");
     _items = twab_classDiagnostics() ?: @[];
+    _displayLines = twab_displayDiagnostics() ?: @[];
     // Only show "Done" when we're the root of a presented nav controller
     // (settings had no nav, so showDiagnostics wrapped + presented us). When
     // pushed onto an existing nav stack, the back button handles dismissal —
@@ -40,11 +43,32 @@ extern NSArray<NSDictionary *> *twab_classDiagnostics(void);
     }
 }
 - (void)twabDone { [self dismissViewControllerAnimated:YES completion:nil]; }
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)t { return 1; }
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)t { return 2; }
 - (NSInteger)tableView:(UITableView *)t numberOfRowsInSection:(NSInteger)s {
-    return (NSInteger)_items.count;
+    return (NSInteger)(s == 1 ? _displayLines.count : _items.count);
+}
+// Window sizes change when an iPhone Duo is opened, closed or put in Split
+// View; refresh so the Display section matches what's on screen.
+- (void)viewWillTransitionToSize:(CGSize)size
+       withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+    [coordinator animateAlongsideTransition:nil completion:^(id ctx) {
+        self->_displayLines = twab_displayDiagnostics() ?: @[];
+        [self.tableView reloadSections:[NSIndexSet indexSetWithIndex:1]
+                      withRowAnimation:UITableViewRowAnimationNone];
+    }];
 }
 - (UITableViewCell *)tableView:(UITableView *)t cellForRowAtIndexPath:(NSIndexPath *)ip {
+    if (ip.section == 1) {
+        UITableViewCell *cell = [t dequeueReusableCellWithIdentifier:@"display"];
+        if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                                 reuseIdentifier:@"display"];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+        cell.textLabel.text = _displayLines[ip.row];
+        cell.textLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+        cell.textLabel.numberOfLines = 0;
+        return cell;
+    }
     UITableViewCell *cell = [t dequeueReusableCellWithIdentifier:@"diag"];
     if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle
                                              reuseIdentifier:@"diag"];
@@ -73,9 +97,13 @@ extern NSArray<NSDictionary *> *twab_classDiagnostics(void);
     return cell;
 }
 - (NSString *)tableView:(UITableView *)t titleForHeaderInSection:(NSInteger)s {
+    if (s == 1) return LOC(@"settings.diag.display", @"Display (iPhone Duo)");
     return LOC(@"settings.diag.header", @"Hooked Twitch classes (this build)");
 }
 - (NSString *)tableView:(UITableView *)t titleForFooterInSection:(NSInteger)s {
+    if (s == 1) return LOC(@"settings.diag.display.footer",
+        @"Open, close or split the screen and this updates. On iPhone Duo, Twitch "
+        @"only fills the inner screen if it was built with inject_ipa.py --duo.");
     return LOC(@"settings.diag.footer",
         @"✓ = the class resolved and its hook is active. ✗ = Twitch renamed or "
         @"removed it, so that feature is inactive until the hook is updated.");

@@ -5,6 +5,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import "Tweak.h"
 #import "SettingsKeys.h"
+#import "DuoSupport.h"
 
 NSBundle *tweakBundle;
 NSUserDefaults *tweakDefaults;
@@ -732,7 +733,8 @@ static void twab_scanForAdFree(UIView *root) {
 
 static void twab_handleAdFree(void) {
   if (![tweakDefaults boolForKey:TWABKeyHideAdFreeButton]) return;
-  for (UIWindow *w in [UIApplication.sharedApplication.windows copy])
+  // All scenes: on iPhone Duo Twitch can have more than one window open.
+  for (UIWindow *w in twab_allWindows())
     twab_scanForAdFree(w);
 }
 

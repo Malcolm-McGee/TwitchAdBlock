@@ -5,6 +5,22 @@ actually *does for you*, in normal words. Newest changes are at the top.
 
 ---
 
+## Unreleased — iPhone Duo support
+
+**Twitch can fill the whole iPhone Duo screen.** On the Duo's big inner
+screen, Twitch normally runs in a phone-sized window with empty space on
+both sides. IPAs built with the new `--duo` option use the whole screen
+instead, and resize as you open, close or split the phone.
+
+**Works with more than one Twitch window.** The "Go Ad-Free" hider now checks
+every open window, so it still works in Split View.
+
+**New in Diagnostics: Display.** Shows whether this Twitch is set up for the
+Duo's full screen, plus each open window's size, so you can tell at a glance
+if `--duo` took effect.
+
+---
+
 ## v0.1.13 — August 13, 2026
 
 **Casting and AirPlay to a TV now work with ad-blocking on.** Before, having the

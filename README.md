@@ -103,6 +103,13 @@ page and jump to **Install**.
 
    (This drops the tweak into the app and lets it load plain-HTTP proxy traffic.)
 
+   **iPhone Duo:** add `--duo` to make Twitch fill the Duo's inner screen.
+   Without it, the Duo shows Twitch in a phone-sized window in the middle,
+   because Twitch is still built with an older Xcode. `--duo` marks the app as
+   built for iOS 27.1, which is what the Duo checks. It stops with an error if
+   a Twitch version can't take it (one without iOS scene support). Check
+   **TwitchMods → Diagnostics → Display** on the phone to see whether it worked.
+
 **Install**
 
 | Method | Steps |

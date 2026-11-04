@@ -6,7 +6,18 @@ injects an LC_LOAD_DYLIB load command into the Twitch Mach-O binary,
 and repacks into a new IPA ready for sideloading.
 
 Usage:
-    python3 inject_ipa.py <input.ipa> <TwitchTTVLOL.dylib> [output.ipa]
+    python3 inject_ipa.py <input.ipa> <TwitchTTVLOL.dylib> [output.ipa] [--duo]
+
+Options:
+    --duo          Opt the app into native iPhone Duo layout. iOS decides how
+                   an app is shown on the Duo's inner display from the SDK the
+                   app binary was built with: older than iOS 27 runs at an
+                   iPhone aspect ratio in the middle of the screen; iOS 27.1
+                   or later gets the whole screen, edge to edge. This bumps the
+                   SDK recorded in the Twitch binary (LC_BUILD_VERSION) and in
+                   Info.plist to iOS 27.1, and drops UIRequiresFullScreen.
+                   It also opts the app into every other "built with iOS 27.1"
+                   behaviour change, so test on a non-Duo iPhone too.
 """
 
 import struct
@@ -189,14 +200,138 @@ def patch_ats(plist_path: str) -> None:
     print(f"  Set NSAppTransportSecurity.NSAllowsArbitraryLoads = True")
 
 
+# ─── iPhone Duo ──────────────────────────────────────────────────────────────
+# The Duo picks an app's inner-display layout from the SDK the app was linked
+# against (dyld reads it from the main binary's LC_BUILD_VERSION):
+#   < iOS 27     iPhone aspect ratio, centred, bars either side
+#   iOS 27.0     extends left of the status bar
+#   >= iOS 27.1  full screen, edge to edge
+# Twitch 31.x is built with an older Xcode, so out of the box it's the first.
+
+LC_VERSION_MIN_IPHONEOS = 0x25
+LC_BUILD_VERSION        = 0x32
+
+DUO_SDK        = (27, 1, 0)
+DUO_SDK_NAME   = "iphoneos27.1"
+DUO_XCODE      = "2710"        # Xcode 27.1
+DUO_XCODE_BLD  = "27A9275"
+
+
+def _ver_pack(v):
+    """(27, 1, 0) -> 0x001B0100 (Mach-O xxxx.yy.zz nibble encoding)."""
+    major, minor, patch = v
+    return (major << 16) | (minor << 8) | patch
+
+
+def _ver_str(packed):
+    major, minor, patch = packed >> 16, (packed >> 8) & 0xFF, packed & 0xFF
+    return f"{major}.{minor}" + (f".{patch}" if patch else "")
+
+
+def read_sdk_version(binary: bytes):
+    """SDK version packed int from LC_BUILD_VERSION / LC_VERSION_MIN_IPHONEOS,
+    or None if the binary has neither."""
+    if struct.unpack_from("<I", binary)[0] != MH_MAGIC_64:
+        return None
+    ncmds = struct.unpack_from("<I", binary, 16)[0]
+    for pos in _cmd_offsets(binary, ncmds, 32):
+        cmd = struct.unpack_from("<I", binary, pos)[0]
+        if cmd == LC_BUILD_VERSION:
+            # build_version_command: cmd cmdsize platform minos sdk ntools
+            return struct.unpack_from("<I", binary, pos + 16)[0]
+        if cmd == LC_VERSION_MIN_IPHONEOS:
+            # version_min_command: cmd cmdsize version sdk
+            return struct.unpack_from("<I", binary, pos + 12)[0]
+    return None
+
+
+def patch_sdk_version(binary: bytes, target=DUO_SDK) -> bytes:
+    """Raise the linked-SDK version in the main binary to `target`. Only ever
+    raises it: a Twitch build already linked against 27.1+ is left alone.
+    Changing load-command bytes invalidates the existing signature, which is
+    fine — AltStore / SideStore / Feather / TrollStore all re-sign."""
+    magic = struct.unpack_from("<I", binary)[0]
+    if magic != MH_MAGIC_64:
+        raise ValueError(f"Not a 64-bit little-endian Mach-O (magic={magic:#010x})")
+    ncmds = struct.unpack_from("<I", binary, 16)[0]
+    want = _ver_pack(target)
+    out = bytearray(binary)
+    found = False
+    for pos in _cmd_offsets(binary, ncmds, 32):
+        cmd = struct.unpack_from("<I", binary, pos)[0]
+        if cmd == LC_BUILD_VERSION:
+            off, name = pos + 16, "LC_BUILD_VERSION"
+        elif cmd == LC_VERSION_MIN_IPHONEOS:
+            off, name = pos + 12, "LC_VERSION_MIN_IPHONEOS"
+        else:
+            continue
+        found = True
+        have = struct.unpack_from("<I", binary, off)[0]
+        if have >= want:
+            print(f"  {name}: SDK already {_ver_str(have)} — no change")
+        else:
+            struct.pack_into("<I", out, off, want)
+            print(f"  {name}: SDK {_ver_str(have)} -> {_ver_str(want)}")
+    if not found:
+        raise RuntimeError("No LC_BUILD_VERSION / LC_VERSION_MIN_IPHONEOS in binary — "
+                           "can't opt it into iPhone Duo layout")
+    return bytes(out)
+
+
+def patch_duo_plist(plist_path: str, orig_sdk) -> None:
+    """Match Info.plist's build metadata to the bumped SDK and remove the one
+    key that fights Duo resizing. Refuses (raises) if the app isn't
+    scene-based: apps linked against the newest SDK must use the scene life
+    cycle or they fail to launch, so faking 27.1 on a non-scene app would
+    give a Twitch that won't open."""
+    with open(plist_path, "rb") as f:
+        data = f.read()
+    fmt = plistlib.FMT_BINARY if data.startswith(b"bplist") else plistlib.FMT_XML
+    plist = plistlib.loads(data)
+
+    if "UIApplicationSceneManifest" not in plist:
+        raise RuntimeError(
+            "This Twitch build has no UIApplicationSceneManifest (it isn't "
+            "scene-based). Linking it as iOS 27.1 would make it fail to launch, "
+            "so --duo can't be used with this version.")
+    scenes = plist["UIApplicationSceneManifest"]
+    multi = bool(scenes.get("UIApplicationSupportsMultipleScenes"))
+    print(f"  Scene manifest present (multiple windows: {'yes' if multi else 'no'})")
+
+    if plist.pop("UIRequiresFullScreen", None) is not None:
+        print("  Removed UIRequiresFullScreen (it blocks clean resizing on fold/unfold)")
+    if plist.pop("UIRequiresFullScreen~ipad", None) is not None:
+        print("  Removed UIRequiresFullScreen~ipad")
+
+    for key, val in (("DTPlatformVersion", f"{DUO_SDK[0]}.{DUO_SDK[1]}"),
+                     ("DTSDKName", DUO_SDK_NAME),
+                     ("DTXcode", DUO_XCODE),
+                     ("DTXcodeBuild", DUO_XCODE_BLD)):
+        old = plist.get(key)
+        if old != val:
+            plist[key] = val
+            print(f"  {key}: {old} -> {val}")
+
+    if orig_sdk is not None and orig_sdk < _ver_pack((26, 0, 0)):
+        print("  NOTE: this Twitch was linked against iOS "
+              f"{_ver_str(orig_sdk)}; it will now also get the iOS 26+ "
+              "system look (Liquid Glass bars). Expected, but check it.")
+
+    with open(plist_path, "wb") as f:
+        plistlib.dump(plist, f, fmt=fmt)
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
         sys.exit(1)
 
-    ipa_path  = sys.argv[1]
-    dylib_src = sys.argv[2]
-    out_path  = sys.argv[3] if len(sys.argv) > 3 else ipa_path.replace(".ipa", "-patched.ipa")
+    args      = sys.argv[1:]
+    duo       = "--duo" in args
+    args      = [a for a in args if a != "--duo"]
+    ipa_path  = args[0]
+    dylib_src = args[1]
+    out_path  = args[2] if len(args) > 2 else ipa_path.replace(".ipa", "-patched.ipa")
 
     print(f"[1/5] Reading IPA: {ipa_path}")
     with zipfile.ZipFile(ipa_path, "r") as z:
@@ -244,6 +379,16 @@ def main():
         binary_data = clear_cryptid(binary_data)
         patched = inject_load_dylib(binary_data, install_name)
 
+        if duo:
+            print("  iPhone Duo: opting into native inner-display layout")
+            info_plist = os.path.join(tmpdir, f"Payload/{app_name}/Info.plist")
+            if not os.path.exists(info_plist):
+                raise RuntimeError(f"--duo: {info_plist} not found")
+            orig_sdk = read_sdk_version(patched)
+            # Plist first: it refuses non-scene apps before we touch the binary.
+            patch_duo_plist(info_plist, orig_sdk)
+            patched = patch_sdk_version(patched)
+
         with open(binary_path, "wb") as f:
             f.write(patched)
 
@@ -279,4 +424,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except RuntimeError as e:
+        print(f"\nERROR: {e}")
+        sys.exit(1)
